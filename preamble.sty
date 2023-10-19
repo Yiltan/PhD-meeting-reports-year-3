@@ -1,0 +1,35 @@
+\ProvidesPackage{preamble}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Packages
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage{amsmath}
+
+\usepackage[hidelinks]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage[top=25mm,
+            bottom=25mm,
+            margin=25mm]
+           {geometry}
+% Spacing
+\usepackage{setspace}
+\doublespacing
+
+\usepackage{parskip}
+\parindent=1.5em
+\parskip=0em
+
+\usepackage{graphicx}
+\usepackage{cite}
+
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup[subfigure]{format=hang}
+\captionsetup[figure]{format=hang}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Macros
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\def\yiltan{Y{\i}ltan Temu\c{c}in}
+
+\newcommand{\frontmatter}{\pagenumbering{Roman}}
+\newcommand{\mainmatter}{\clearpage\pagenumbering{arabic}}
