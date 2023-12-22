@@ -1,4 +1,4 @@
-PDF_READER='zathura'
+PDF_READER='okular'
 SPELL_LANG='en_GB'
 
 OUT_DIR=out
