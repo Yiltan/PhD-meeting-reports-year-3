@@ -20,6 +20,32 @@
                 decorations.shapes,
                 positioning}
 
+\usepackage{listings}
+\definecolor{mGreen}{rgb}{0,0.6,0}
+\definecolor{mGray}{rgb}{0.5,0.5,0.5}
+\definecolor{mPurple}{rgb}{0.58,0,0.82}
+\definecolor{backgroundColour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{CStyle}{
+    backgroundcolor=\color{backgroundColour},
+    commentstyle=\color{mGreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{mGray},
+    stringstyle=\color{mPurple},
+    basicstyle=\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    language=C
+}
+
 \begin{document}
 \frontmatter
   \title{Pre-Meeting Report}
@@ -28,392 +54,240 @@
   \tableofcontents
   \mainmatter
 
-%  \section{GPU Partitioned Communication}
-%  \subsection{Application Porting}
-%  Although we don't have a system to get the ``GPU-Triggering'' to work,
-%  we can still begin the application porting effort using the thread-based
-%  approach.
-%  I have been reading through papers and source code of applications to seek viable
-%  candiates:
-%  %
-%  \begin{itemize}
-%    \item NWChem/BSPMM
-%    \item Quick Silver
-%    \item FFTX
-%  \end{itemize}
-%
-%  \vspace{-1\baselineskip}
-%  \section{Rockport Benchmarking}
-%  \vspace{-0.5\baselineskip}
-%  \noindent
-%  I think this part has been discussed with Amir.
-
-  \vspace{-1\baselineskip}
-  \section{MPI Partitioned Collectives}
-  \vspace{-0.5\baselineskip}
-  \subsection{Implementation}
+  \section{Implementation Details}
+  \subsection{Communication Back-End}
   \begin{itemize}
-    \item I added the bindings and created an MCA module for partitioned
-          collectives.
-
-    \item Initial plan is to implement some of the more popular collectives
-          using the existing persistent MPI Partitioned implementation.
-          Traditional collectives will act as a baseline
-          and this will be an incremental step when we evaluate.
-
-    \item Then implement an RMA version using UCX.
-    \begin{itemize}
-      \item UCX does not expose \texttt{IBV\_WR\_RDMA\_WRITE\_WITH\_IMM}
-      \item Initial plan was to use the immidate values as remote `events' that would
-            aid the scheduling of communication.
-      \item Could Active messages be used as an alternative?
-    \end{itemize}
-
-    \item How do we want to evaluate these collectives?
+    \item For this implementation, I rely on Open MPI's PML layer (i.e calls to UCX tag interface)
+    \item Open MPI's Persistent MPI Partitioned implementation has a bug
+          (See Appendix~\ref{app:pcomm:bug} for details)
   \end{itemize}
 
-  \subsection{Modeling on Rockport Networks}
-  We can use Hockney's Model for our collective design:
-  %
-  \begin{equation}
-    T = \alpha + \beta m
-  \end{equation}
-  %
-  To model the theoretical bandwidth of the Rockport Network we use the following equation:
-  %
-  \begin{equation}
-    \beta_L =
-      \begin{cases}
-        25L \text{~Gbps} & \text{if~} L \leq 4 \\
-        100 \text{~Gbps} & \text{otherwise}
-      \end{cases}
-  \end{equation}
-  %
+  \subsection{MPI\_P\textless collective\textgreater\_init()}
+  As there are many collectives that are required to implemented
+  for a complete library, I wanted to design a generic communication schedule.
+  To faciliate this,
+  the only difference between each collective is the communication graph.
+  Our initialization functions are as follows:
+  \begin{itemize}
+    \item Create communication graph that represents the communication algorithm (i.e k-nomial, linear, etc)
+    \begin{itemize}
+      \item The alogrithm selection would occur at this stage
+    \end{itemize}
+    \item Allocate request object and add it to the message progression engine.
+    \item {\color{red} Question:} Does the ranks in the collective need to be matched at this point?
+    \begin{itemize}
+      \item For a point-to-point implementation we can deffer this
+    \end{itemize}
+  \end{itemize}
+
+  \subsection{MPI\_Start()}
+  \begin{itemize}
+    \item Ranks that recv, post their recives for the next round
+  \end{itemize}
+
+  \subsection{MPI\_Pready()}
+  \begin{itemize}
+    \item Ranks that send, send the data for their partition
+  \end{itemize}
+
+  \subsection{MPI\_Parrived()}
+  \begin{itemize}
+    \item Ranks that only recive:
+    \begin{itemize}
+      \item Checks if the flag for partition has been set, if not, then enters
+            the progression engine
+      \begin{itemize}
+        \item Entering the message progression engine is expensive but will
+              deadlock if it does not enter
+      \end{itemize}
+    \end{itemize}
+    \item Ranks that recive and forward messages to other ranks:
+    \begin{itemize}
+      \item Checks if the flag for partition has been set, if not, then enters
+            the progression engine
+      \item If the flag is true, then it calls pready for the ranks that the
+            message is being forwared to
+    \end{itemize}
+  \end{itemize}
+
+  \section{Performance Results}
+  Results are on Niagara (ConnectX-5), good proxy for NC1225 while we dealt with teething issues.
+  \subsection{Testing Methodology}
+  \begin{itemize}
+    \item Each Rank has $n$ threads/partitions
+    \item For each rank:
+    \begin{itemize}
+      \item A single thread is chosen at random $t_i \in \{t_0, \cdots, t_n\}$ from a uniform distribution
+      \item Some delay $\Delta$ is applied to that thread
+    \end{itemize}
+    \item This results in the likeley secnario where different partitions are
+          blocking on different ranks
+  \end{itemize}
+
+  \subsection{Bcast - Linear Algorithm}
+  \begin{itemize}
+    \item Significant performance degregation for small messages
+    \item Minor to negiliable performance benefit for medium/large messages
+  \end{itemize}
+
+  \begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-linear-bcast-tree/small.pdf}
+      \caption{Small}
+    \end{subfigure}
+
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-linear-bcast-tree/med.pdf}
+      \caption{Medium}
+    \end{subfigure}
+    \hfill
+
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-linear-bcast-tree/large.pdf}
+      \caption{Large}
+    \end{subfigure}
+    \caption{Comparison of Partitioned and Traditional Broadcast communication
+             pattern using the linear algorithm. Using 16 ranks with 32 threads
+             (512 cores) and $\Delta = 40\mu s$.}
+  \end{figure}
+
+  \clearpage
+  \subsection{Bcast - Binomial Algorithm}
+  \begin{itemize}
+    \item Using MPI\_Parrived has significan perfomance implications in this design
+    \begin{itemize}
+      \item This is the cost of entering the message progression engine
+    \end{itemize}
+  \end{itemize}
+
+  \begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/small_64.pdf}
+      \caption{Small}
+    \end{subfigure}
+
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/med_64.pdf}
+      \caption{Medium}
+    \end{subfigure}
+    \hfill
+
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/large_64.pdf}
+      \caption{Large}
+    \end{subfigure}
+    \caption{Comparison of Partitioned and Traditional Broadcast communication
+             pattern using the binomial algorithm. Using 64 ranks with 32 threads
+             (2048 cores) and $\Delta = 40\mu s$.}
+  \end{figure}
+
+  \section{Future Work}
+  \subsection{RMA Implementation}
+
+  \subsection{Mapping Graph}
+  Currently we have a generic framework which can execute and arbitrary
+  partitioned collective.
+  To further optimize this we can use some system information:
+  \begin{itemize}
+    \item \textbf{Slurm Job Information}
+    \begin{itemize}
+      \item Obtain the nodes in our current allocation
+      \item Could even obtain list of inactive node that we could use for
+            routing messages on the NC1225.
+    \end{itemize}
+    \item \texttt{rpcli}
+    \begin{itemize}
+      \item Obtain the topology of our network
+    \end{itemize}
+    \item \textbf{Collective Information}
+    \begin{itemize}
+      \item Typical information like message size, number of partitions, rank
+            size, algorithm, etc.
+    \end{itemize}
+  \end{itemize}
+
   \noindent
-  This seemed like an appropriate way to model the collectives for this network
-  as each fibre optic link is rated to 25Gbps
-  and we are limited by the ConnectX-5 to FPGA link (100Gbps).
+  The goal would be to utilize this information to construct a better
+  partitioned collective algorithm
 
-  \subsection{Existing Algorithms}
-  \label{sec:existing_algos}
-  There is a large body of work regarding collective communication,
-  especially within the context of MPI. I have started to evaluate existing algorithoms
-  using the above model. The details can be seen in Appendix~\ref{app:start}.
-  Generally speaking,
-  the following can be seen:
-  \begin{itemize}
-    \item Using more links are beneficial for small messages
-    \item Most existing algorthims are limited to $\beta_1$ or $\beta_2$ for large messages
-    \item Algorithms may benefit from using fewer links (i.e $\beta_4$ rather than $\beta_{12}$) for large messages
-  \end{itemize}
+  \begin{figure}[h]
+    \centering
+    \usetikzlibrary{math}
+    \begin{tikzpicture}[scale=.7]
+        \tikzmath{ \w = 6; \h = 3; \x = 2; }
+        \draw [fill=gray!30,thick] (-\w/2,-\h/2) rectangle (\w/2,\h/2);
 
-  \subsection{Future Work}
-  \begin{itemize}
-    \item Explore more torus-specific algorithms
-    \item Model using barriers for \texttt{MPI\_Pbuf\_Prepare}
-          vs using algorithm specific neighborhood syncronization.
-  \end{itemize}
+        \draw [->,thick] (\w/2, 0) -- (\w/2+\x,0);
 
-  \subsection{Questions}
-  \begin{itemize}
-    \item Does the NC1225 have any message broadcasting support (unsure on exact term)
-    \begin{itemize}
-      \item A single put opperaction to the MLNX chip,
-            once converted to a FLIT on the FPGA,
-            that FLIT is sent to muliple nodes.
-      \item This would allow for collective designs that are not limited by the
-            CX5-FPGA link.
-    \end{itemize}
-    \item Any compute operations on the NC1225 FPGA without converting the FLIT back to an Ethernet packet?
-    \begin{itemize}
-      \item Would it be worth modeling the performance benefit of such feature?
-    \end{itemize}
-    \item On TACC what do does the topology of allocations look like?
-    \begin{itemize}
-      \item We would only have a perfect torus for $P= 2^6 = 64 $ and $P = 3^6 = 729$.
-    \end{itemize}
-  \end{itemize}
+        \draw [->,thick] (-\w/2-\x, 0) -- (-\w/2,0);
+        \draw [->,thick] (-\w/2-\x, 1) -- (-\w/2,1);
+        \draw [->,thick] (-\w/2-\x, -1) -- (-\w/2, -1);
+
+        \node [left] at (-\w/2-\x,0) {\texttt{rpcli}};
+        \node [left] at (-\w/2-\x,1) {Slurm Job Information};
+        \node [left] at (-\w/2-\x,-1) {Collective Infomation};
+        \node [right] at (\w/2+\x, 0) {Optimized Collective Graph};
+        \node [align=left,font=\ttfamily] at (0,0) {Mapping Algorithm};
+    \end{tikzpicture}
+    \caption{High Level Diagram of our Mapping Approach}
+  \end{figure}
 
   \clearpage
   \appendix
   \section{Appendix}
-  \label{app:start}
-  \subsection{Modeling on Rockport Networks}
+  \label{app:pcomm:bug}
+  \subsection{Open MPI's Persistent MPI Partitioned Bug}
   \noindent
-  \textbf{Hockney's Model:}\\
-  To model our algorithms in this work we use Hockney's model \cite{Hockney}.
-  This model has two parameters $\alpha$ which is the latency of each message
-  and $\beta$ is network bandwidth.
-  We model the time to send a message of $m$ bytes as:
-  %
-  \begin{equation}
-    T = \alpha + \beta m
-  \end{equation}
-  %
-  Although there is the LogGP model \cite{LogGP} for point-to-point communication and
-  the PLogGP model \cite{PLogGP} for partitioned communication,
-  modelling the delay propagations with $P$ dependencies in partitioned collectives are quite difficult.
-  The restriction to Hockney's model essentially assumes that the partitioned arrive in relatively similar manner.
-  However We believe that this is sufficient to approximate our collectives as well
-  as the \texttt{MPI\_Pbuf\_prepare} function call.
+  Open MPI's Persistent MPI Partitioned implementation deadlocks (1 in 10 executions),
+  if the following conditions are met:
+  \begin{itemize}
+    \item Partitions \textgreater 16
+    \item Iterations \textgreater 2
+  \end{itemize}
 
-  \noindent
-  \textbf{Model Application:} \\
-  As we are modelling collectives rather than point-to-point,
-  we will have to make a few additional considerations.
-  %
-  The Cerio SHFL is a 6D torus network,
-  therefore we have have 12 ports with 25Gbps bandwidth on each node.
-  We assume that each port can send and receive a message simultaneously
-  and that we only have once process per node as our focus is on the network.
-  %
-  To model the theoretical bandwidth of this network we use the following equation:
-  %
-  \begin{equation}
-    \beta_L =
-      \begin{cases}
-        25L \text{~Gbps} & \text{if~} L \leq 4 \\
-        100 \text{~Gbps} & \text{otherwise}
-      \end{cases}
-  \end{equation}
-  %
-  This piecewise function is used as when sending data from the host to the network we are limited
-  to the 100Gbps link between the ConnectX-5 chip and the FPGA.
-  Therefore,
-  we can use four links at full bandwidth but if we use more we will not be able to
-  saturate the links between nodes.
-  %
-  This issue can be resolved by using a multi-path collective design where we
-  forward messages between nodes with staging in host memory.
-  However,
-  at the time of writing this paper these features are yet to be exposed to MPI via UCX.
+  \subsubsection{Minimum Bug Creating Example}
+  The bug occurs in rank 1 as \texttt{sreq} never completes.
+  \singlespacing
+  \lstinputlisting[style=CStyle]{pcomm_bug.c}
+  \doublespacing
 
-  For collectives such as \texttt{MPI\_Reduce}, \texttt{MPI\_Allreduce}, etc.,
-  there will be a computation component to our collective.
-  We introduce the parameter $\gamma$ which is the computation time per byte.
-  %
-  At this current moment in time the Cerio NC1225 does not have compute units on
-  its FPGA.
-  Therefore,
-  $\gamma$ include the time to move the data to the host,
-  compute the \texttt{MPI\_Op},
-  and then return the data to the network.
-  We assume that this cost is linear.
-  In Section \yht{X},
-  we will provide analysis on the latency improvements
-  that could obtained if hardware units were to be implemented in the FPGA.
-  \subsection{Existing Algorithms}
-  \noindent
-  This section contains the details of investigating existing algorithms.
+  \clearpage
+  \subsection{Bcast - Binomial Algorithm - 8 Ranks}
+  \begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/small.pdf}
+      \caption{Small}
+    \end{subfigure}
 
-  \subsubsection{Recursive Doubling}
-  In the recursive doubling algorithm we double the distance with our neighbour at each step.
-  For example in Step 1 process $p$ communicates $m$ bytes with its neighbour $p + 1 \text{~mod~} P$,
-  then in Step 2 process $p$ communicates $2m$ with its neighbour $p + 2 \text{~mod~} P$,
-  in Step 3 process $p$ communicates $4m$ with its neighbour $p + 4 \text{~mod~} P$,
-  and so forth.
-  Essentially at each step $s$ each process communicates $2^s m$ bytes of data
-  with process $p \text{~XOR~} 2^s$.
-  This results in the $P$ processes communication with one another in $\log_2(P)$ steps.
-  As for the bandwidth term for large values of P,
-  we will communicate:
-  $
-  \sum_{s=0}^{\log_2(P - 1)} 2^s m = (2^{log_2(P-1) + 1} - 1) \cdot m
-                             \approx (2^{log_2(P-1)} - 1 ) \cdot m
-                                   = (P - 1) \cdot m
-  $.
-  On a Cerio Network this would only use a single link,
-  thus we will use a $\beta$ value of $\beta_1$.
-  %
-  Therefore,
-  this algorithm can be modelled as:
-  %
-  \begin{equation}
-    \label{eqn:rec_dbl}
-    T_{rec\_dbl} = \log_2(P) \cdot \alpha + (P - 1) \cdot \beta_1 m
-  \end{equation}
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/med.pdf}
+      \caption{Medium}
+    \end{subfigure}
+    \hfill
 
-  If we were to use this algorithm for \texttt{MPI\_Allreduce},
-  then we would have to consider the reduction term $\gamma$ and we would reduce the data at each
-  step.
-  This will result in the same $\alpha$ term as in Equation~\ref{eqn:rec_dbl}
-  but our bandwidth term will change as we will
-  now reduce the data and only send $m$ bytes at each step.
-  Thus we will have the following:
-  %
-  \begin{equation}
-    T_{rec\_dbl\_allreduce}
-    = \log_2(P) \cdot (\alpha + \beta_1 m + \gamma m )
-  \end{equation}
-
-  \subsubsection{Bruck}
-  The Bruck algorithm \cite{BruckAlgo}
-  is use to implement collectives with all-to-all communication
-  patterns such as \texttt{MPI\_Allgather}.
-  %
-  In this algorithm,
-  at each step $s$, each rank $p$ sends data to rank
-  $p + 2^s$ and recives data from rank $p - 2^s$.
-  This results in a similar algorithm (as shown by $T_{bruck}$)
-  to Recursive Doubling but we send/recive from different ranks.
-  %
-  Despite communicating with two ranks,
-  we still have a $\beta$ of $\beta_1$.
-  Recursive Doubling uses a single link bidirectionally but here
-  we use two links uni-directionally which results in the same total load on
-  our NIC.
-  %
-  It has been shown in \cite{Colls_In_MPICH},
-  that this algorithm can out perform recursive doubling for small messages
-  despite having the same latency term,
-  as well as for non-power of two values of $P$
-  \yht{Unclear why in the paper}.
-  %
-  \begin{equation}
-      T_{bruck} = \log_2(P - 1) \cdot \alpha + (P - 1) \cdot \beta_1 m
-  \end{equation}
-
-  \subsubsection{K-nomial Tree}
-  The K-nomial tree algorithm is a generalized version of
-  the commonly known binomial tree algorithm \cite{Wilkins2023Generalized}.
-  %
-  The structure of this is algorithm is such that the communication pattern
-  is a tree at each process where each process has $k$ sub-trees.
-  This results in the start up cost of this algorithm to be $\log_k(P - 1)\cdot\alpha$.
-  At each step,
-  each process communicates $m$ bytes to its $k$ neighbours for $\log_k(P - 1)$ resulting in a bandwidth term of
-  $k m \cdot \log_k(P - 1)$.
-  If we map the process in a which all $k$ neighbours are adjacent to your process we would arrive
-  at a bandwidth term of $\beta_k$.
-  However this will require some hardware topology-aware mechanisms to benefit from this.
-  %
-  \begin{equation}
-    \label{eqn:k-nomial}
-    T_{k\_nomial} = \log_k(P - 1) \cdot \alpha + k \cdot \log_k(P - 1) \cdot \beta_k
-  \end{equation}
-  %
-  It can be seen that if $k=12$ we would exploit maximum parallelism for small messages as
-  we would be using all available ports.
-  However,
-  due to our piecewise bandwidth function $\beta_{12} \equiv \beta_4$
-  it results in our bandwidth multiplier performing much worse:
-  \begin{align}
-  \begin{split}
-    %
-    12 \log_{12}(P - 1) \cdot \beta_{12} &> 4 \log_4(P - 1) \cdot \beta_4 \\
-    %
-    3 \log_{12}(P - 1) &> \log_4(P - 1) \\
-    %
-    3 \frac{\log_{10}(P - 1)}{\log_{10}(12)} &> \frac{\log_{10}(P - 1)}{\log_{10}(4)} \\
-    %
-    \frac{3}{\log_{10}(12)} &> \frac{1}{\log_{10}(4)} \\
-    %
-    3\log_{10}(4) &> \log_{10}(12) \\
-    %
-    \log_{10}(4^3) &> \log_{10}(12) \\
-    %
-    \log_{10}(64) &> \log_{10}(12) \\
-    %
-  \end{split}
-  \end{align}
-  %
-  \noindent
-  The above statement holds true.
-  Therefore,
-  on this platform this collective would be better to use $k=4$ for larger
-  messages as fewer fully utilized links perform better than using more links that are less utilized.
-  \yht{Verify you can construct a k-nary tree on a torus}
-  %
-  The K-nomial tree algorithm can be adjusted to \texttt{MPI\_Allreduce}
-  by the addition of the $\gamma$ terms.
-  When used in this context we still suffer from bandwidth limitations we saw for
-  \texttt{MPI\_Allgather}.
-  %
-  \begin{equation}
-    \label{eqn:k-nomial}
-    T_{k\_nomial} = \log_k(P - 1) \cdot \alpha
-                  + k \cdot \log_k(P - 1) \cdot \beta_k
-                  + k \cdot \log_k(P - 1) \cdot \gamma
-  \end{equation}
-
-  \subsubsection{Ring}
-  The ring algorithm involves each process $p$ sending to its neighbour $p + 1 \text{~mod~} P$,
-  this results in $P - 1$ communication steps for all processes to communicate with each other.
-  Again we are only use a single link and have a value of $\beta_1$
-  Therefore the communication time for ring with an $m$ byte sized send buffer:
-  %
-  \begin{equation}
-    \label{eqn:ring}
-    T_{ring} = (P - 1) \cdot (\alpha + \beta_1 m)
-  \end{equation}
-  %
-  \noindent
-  However this algorithm is limited as it only utilizes the uni-directional bandwidth.
-  If we make this ring bi-directional then we can better utilize bandwidth for large messages
-  as we increase our bandwidth from $\beta_1$ to $\beta_2$:
-  %
-  \begin{equation}
-    \label{eqn:ring_bi}
-    T_{bi\_ring} = (P - 1) \cdot (\alpha + \beta_2 m)
-  \end{equation}
-
-  The algorithm in Equation~\ref{eqn:ring_bi}is sufficient to model an
-  \texttt{MPI\_Allgather} collective but
-  if we were implement collectives such as \texttt{MPI\_Allreduce} we would have an additional
-  computation term $\gamma$.
-  %
-  \begin{equation}
-    T_{bi\_ring\_allreduce}
-      = (P - 1) \cdot (\alpha + \beta_2 m + \gamma m)
-  \end{equation}
-  %
-  \noindent
-  This could further optimize our by overlapping computation and communication by pipelining $n$
-  chunks.
-  We assume the first communication chunk cannot be overlapped.
-  However,
-  the second to $n$ chunks can be overlapped with the previous reduction.
-  Then we have one last reduction before our collective finishes.
-  %
-  \begin{equation}
-    T_{pipelined\_bi\_ring\_allreduce}
-      = (P - 1) \cdot \Bigl(\alpha +
-                            (\beta_2 + (n - 1) \cdot max\{\beta_2, \gamma\} + \gamma)\frac{m}{n}
-                      \Bigr)
-  \end{equation}
-
-%  \subsubsection{Binary Block}
-
-%  \subsubsection{Rabenseifner}
-%  \subsubsection{Two-Trees}
-%  \subsubsection{Sack-Gropp}
-%  \subsection{Measurement}
-%  \begin{tikzpicture}
-%
-%  % Processes
-%  \node [align=right] at (-.3,2) {$P_0$};
-%  \draw [thick, black] (0,2) -- (7.00,2);
-%
-%  \node [align=right] at (-.3,1) {$P_1$};
-%  \draw [thick, black] (0,1) -- (7.00,1);
-%
-%  \node [align=right] at (-.3,0) {$P_2$};
-%  \draw [thick, black] (0,0) -- (7.00,0);
-%
-%  % Pbcast Init
-%  \node[draw, rectangle, fill=black!5!white]
-%       (pbcastinit0) at (1.7,2) {\texttt{MPI\_Pbcast\_init}};
-%  \node[draw, rectangle, fill=black!5!white]
-%       (pbcastinit1) at (2,1) {\texttt{MPI\_Pbcast\_init}};
-%  \node[draw, rectangle, fill=black!5!white]
-%       (pbcastinit1) at (1.9,0) {\texttt{MPI\_Pbcast\_init}};
-%
-%
-%
-%  \end{tikzpicture}
+    \begin{subfigure}[b]{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{data-knomial-2-bcast/large.pdf}
+      \caption{Large}
+    \end{subfigure}
+    \caption{Comparison of Partitioned and Traditional Broadcast communication
+             pattern using the binomial algorithm. Using 8 ranks with 32 threads
+             (256 cores) and $\Delta = 40\mu s$.}
+  \end{figure}
 
   \clearpage
   \addcontentsline{toc}{section}{References}
   \bibliography{cite.bib}
   \bibliographystyle{IEEEtran}
-  \end{document}
+\end{document}
